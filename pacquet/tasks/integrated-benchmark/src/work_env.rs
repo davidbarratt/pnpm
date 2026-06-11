@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    fmt,
+    fmt::{self, Write as _},
     fs::{self, File},
     io::Write,
     net::{Ipv4Addr, SocketAddr, TcpStream},
@@ -68,6 +68,7 @@ pub struct WorkEnv {
     /// of being free on loopback. `0` leaves the registry at loopback
     /// speed. Ignored in `--registry=npm` mode (already remote).
     pub registry_bandwidth_mbps: f64,
+    pub registry_slow_start: bool,
     /// Port the local registry listens on, used as the proxy's upstream
     /// when latency or a bandwidth cap is requested.
     pub registry_port: u16,
@@ -227,7 +228,7 @@ impl WorkEnv {
             eprintln!("Populating proxy registry cache...");
             Command::new("bash")
                 .arg(self.script_path(WorkEnv::INIT_PROXY_CACHE))
-                .pipe_mut(executor("install.bash"))
+                .pipe_mut(executor("install.bash"));
         }
     }
 
@@ -549,6 +550,7 @@ impl WorkEnv {
             let profile = LinkProfile {
                 one_way: Duration::from_millis(self.pnpr_latency_ms) / 2,
                 rate_limit: None,
+                slow_start: false,
             };
             let proxy = LatencyProxy::spawn(upstream, profile).expect("spawn pnpr latency proxy");
             let proxy_url = format!("http://{}", proxy.addr);
@@ -596,13 +598,12 @@ impl WorkEnv {
         let registry_proxy = self.start_client_registry_proxy();
         let client_registry = registry_proxy
             .as_ref()
-            .map(|proxy| format!("http://{}/", proxy.addr))
-            .unwrap_or_else(|| self.registry.clone());
+            .map_or_else(|| self.registry.clone(), |proxy| format!("http://{}/", proxy.addr));
         let pnpr_server_registry_proxy = self.start_pnpr_server_registry_proxy();
-        let pnpr_server_registry = pnpr_server_registry_proxy
-            .as_ref()
-            .map(|proxy| format!("http://{}/", proxy.addr))
-            .unwrap_or_else(|| self.registry_cache_populator.clone());
+        let pnpr_server_registry = pnpr_server_registry_proxy.as_ref().map_or_else(
+            || self.registry_cache_populator.clone(),
+            |proxy| format!("http://{}/", proxy.addr),
+        );
 
         self.init(&client_registry);
         self.build();
@@ -649,6 +650,7 @@ impl WorkEnv {
         let profile = LinkProfile {
             one_way: Duration::from_millis(self.registry_latency_ms) / 2,
             rate_limit,
+            slow_start: self.registry_slow_start,
         };
         let proxy = LatencyProxy::spawn(upstream, profile).expect("spawn registry proxy");
         eprintln!(
@@ -676,6 +678,7 @@ impl WorkEnv {
         let profile = LinkProfile {
             one_way: Duration::from_millis(self.pnpr_server_registry_latency_ms) / 2,
             rate_limit: None,
+            slow_start: false,
         };
         let proxy =
             LatencyProxy::spawn(upstream, profile).expect("spawn pnpr server registry proxy");
@@ -1013,8 +1016,9 @@ fn render_diagnostics_markdown(
     out.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for target in &diagnostics.targets {
         let partition = target.phase_summary.partition.as_ref();
-        out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {} | {} |",
             target.id,
             format_seconds(target.hyperfine_mean_seconds),
             format_u64(partition.map(|metric| metric.warm)),
@@ -1023,15 +1027,16 @@ fn render_diagnostics_markdown(
             format_ms(target.phase_summary.create_virtual_store_mean_ms),
             format_ms(link_slots_mean(&target.phase_summary, "warm")),
             format_ms(link_slots_mean(&target.phase_summary, "cold")),
-        ));
+        );
     }
     if !diagnostics.pnpr_direct_ratios.is_empty() {
         out.push_str("\n| Ratio | value |\n| --- | ---: |\n");
         for ratio in &diagnostics.pnpr_direct_ratios {
-            out.push_str(&format!(
-                "| pnpr@{} / pacquet@{} | {:.3} |\n",
+            let _ = writeln!(
+                out,
+                "| pnpr@{} / pacquet@{} | {:.3} |",
                 ratio.revision, ratio.revision, ratio.ratio,
-            ));
+            );
         }
     }
     out
@@ -1212,7 +1217,7 @@ where
         for (dst, src) in cleanup.restore {
             let src_path = dir.join(src).maybe_quote().to_string();
             let dst_path = dir.join(dst).maybe_quote().to_string();
-            command.push_str(&format!(" && cp {src_path} {dst_path}"));
+            let _ = write!(command, " && cp {src_path} {dst_path}");
         }
     }
 
@@ -1408,8 +1413,7 @@ fn create_install_script(dir: &Path, scenario: BenchmarkScenario, command: &str,
         writeln!(file, r#"export TRACE_FORMAT="${{TRACE_FORMAT:-json}}""#).unwrap();
         writeln!(
             file,
-            r#"printf '{{"benchmarkTarget":"{}","event":"runStart"}}\n' >> {}"#,
-            id, BENCHMARK_OUTPUT_LOG,
+            r#"printf '{{"benchmarkTarget":"{id}","event":"runStart"}}\n' >> {BENCHMARK_OUTPUT_LOG}"#,
         )
         .unwrap();
     }
@@ -1470,7 +1474,7 @@ impl BenchId<'_> {
     }
 }
 
-impl<'a> fmt::Display for BenchId<'a> {
+impl fmt::Display for BenchId<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BenchId::PacquetRevision(revision) => write!(f, "pacquet@{revision}"),

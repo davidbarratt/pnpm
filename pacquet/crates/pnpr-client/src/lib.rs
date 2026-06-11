@@ -111,6 +111,15 @@ pub struct ResolvedPackage {
     pub integrity: String,
     /// The resolver's `dist.tarball` URL.
     pub tarball: String,
+    /// `dist.unpackedSize` from the server-side resolve, when the
+    /// registry published one. Sizes the decompression buffer exactly
+    /// and prioritizes the largest pending downloads when the
+    /// connection pool is saturated.
+    pub unpacked_size: Option<usize>,
+    /// `dist.fileCount` from the server-side resolve, when the registry
+    /// published one. The per-file term of the download priority's
+    /// pipeline-work estimate.
+    pub file_count: Option<usize>,
 }
 
 #[derive(Debug, Display, Error, From)]
@@ -254,8 +263,24 @@ impl PnprClient {
                     continue;
                 }
                 match parse_frame(line)? {
-                    Frame::Package { id, name, version, integrity, tarball } => {
-                        on_package(ResolvedPackage { id, name, version, integrity, tarball });
+                    Frame::Package {
+                        id,
+                        name,
+                        version,
+                        integrity,
+                        tarball,
+                        unpacked_size,
+                        file_count,
+                    } => {
+                        on_package(ResolvedPackage {
+                            id,
+                            name,
+                            version,
+                            integrity,
+                            tarball,
+                            unpacked_size,
+                            file_count,
+                        });
                     }
                     Frame::Done { lockfile, stats } => {
                         return Ok(ResolveOutcome { lockfile: *lockfile, stats });
@@ -289,6 +314,13 @@ enum Frame {
         version: String,
         integrity: String,
         tarball: String,
+        /// Absent from frames sent by servers that predate the field
+        /// and for packages whose registry never published a
+        /// `dist.unpackedSize`.
+        #[serde(rename = "unpackedSize", default)]
+        unpacked_size: Option<usize>,
+        #[serde(rename = "fileCount", default)]
+        file_count: Option<usize>,
     },
     /// Boxed: the lockfile dwarfs the other variants, so keeping it
     /// behind a pointer keeps the enum small.
@@ -321,7 +353,7 @@ fn build_verify_error(mut violations: Vec<WireViolation>) -> VerifyError {
     violations.sort_by(|left, right| {
         format!("{}@{}", left.name, left.version).cmp(&format!("{}@{}", right.name, right.version))
     });
-    let rendered = violations
+    let rendered: Vec<RenderedViolation> = violations
         .into_iter()
         .map(|violation| RenderedViolation {
             name: violation.name,
@@ -330,7 +362,7 @@ fn build_verify_error(mut violations: Vec<WireViolation>) -> VerifyError {
             reason: violation.reason,
         })
         .collect();
-    VerifyError::from_rendered(rendered)
+    VerifyError::from_rendered(&rendered)
 }
 
 /// Map a wire violation code back to the `&'static str` constant

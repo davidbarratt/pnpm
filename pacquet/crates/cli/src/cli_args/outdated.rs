@@ -146,7 +146,7 @@ pub async fn collect_outdated(
                 current,
                 target: target.version.clone(),
                 deprecated,
-                homepage: package.homepage.clone(),
+                homepage: package.homepage,
             })
         });
 
@@ -156,11 +156,11 @@ pub async fn collect_outdated(
 /// Resolve the [`TargetVersion`] to a concrete published version, or
 /// `None` when the registry has no matching version (no `latest` tag, no
 /// in-range version, or a non-semver range).
-fn resolve_target<'a>(
-    package: &'a Package,
+fn resolve_target(
+    package: &Package,
     range: &str,
     target_version: TargetVersion,
-) -> Option<&'a PackageVersion> {
+) -> Option<std::sync::Arc<PackageVersion>> {
     match target_version {
         TargetVersion::Latest => {
             let tag = package.dist_tag("latest")?;
@@ -438,7 +438,7 @@ fn change_priority(change: Change) -> u8 {
 fn sort_outdated(outdated: &mut [OutdatedPackage], sort_by: Option<SortBy>) {
     match sort_by {
         Some(SortBy::Name) => {
-            outdated.sort_by(|left, right| left.package_name.cmp(&right.package_name))
+            outdated.sort_by(|left, right| left.package_name.cmp(&right.package_name));
         }
         None => outdated.sort_by(|left, right| {
             let by_change = change_priority(classify(&left.current, &left.target))
